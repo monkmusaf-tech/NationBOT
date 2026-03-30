@@ -4,6 +4,44 @@ from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 from utils.helpers import make_keyboard, format_number, clamp
 
 
+async def handle_give_resource_text(update: Update, context, db):
+    """Handle text input for giving resources. Called from bot.py text router."""
+    target_data = context.user_data.get("awaiting_give_target")
+    if not target_data:
+        return
+
+    context.user_data.pop("awaiting_give_target")
+    target_id = target_data["target_id"]
+    resource = target_data["resource"]
+
+    try:
+        amount = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("⚠️ Masukkan angka yang valid!")
+        return
+
+    nation = db.get_nation(target_id)
+    if not nation:
+        await update.message.reply_text("⚠️ Negara tidak ditemukan!")
+        return
+
+    new_val = nation.get(resource, 0) + amount
+    if resource in ("happiness", "stability", "approval_rating", "corruption",
+                    "freedom_index", "military_morale"):
+        new_val = clamp(new_val)
+    else:
+        new_val = max(0, new_val)
+
+    db.update_nation(target_id, {resource: new_val})
+
+    await update.message.reply_text(
+        f"✅ **Resource Diberikan!**\n\n"
+        f"🏛️ {nation['name']}\n"
+        f"📦 {resource}: {nation.get(resource, 0)} → {new_val} ({'+' if amount > 0 else ''}{amount})",
+        parse_mode="Markdown"
+    )
+
+
 def admin_handlers(db, super_admin_id):
 
     def is_admin(user_id):
@@ -47,7 +85,7 @@ def admin_handlers(db, super_admin_id):
             ("💰 Beri Resource", "adm_give"),
             ("🔧 Setting Game", "adm_settings"),
             ("📢 Broadcast Pesan", "adm_broadcast"),
-            ("🗑️ Hapus Negara", "adm_delete"),
+            ("🗑️ Hapus Negara", "adm_delete_menu"),
             ("📊 Export Data", "adm_export"),
             ("🔄 Reset Game", "adm_reset_confirm"),
         ], columns=2)
@@ -114,6 +152,7 @@ def admin_handlers(db, super_admin_id):
             ("😡 -20 Happiness", f"adm_rem_happy_{target_id}"),
             ("☢️ +1 Nuklir", f"adm_add_nuke_{target_id}"),
             ("⚖️ +20 Stabilitas", f"adm_add_stab_{target_id}"),
+            ("📦 Beri Resource Custom", f"adm_givecustom_{target_id}"),
             ("🗑️ Hapus Negara", f"adm_del_{target_id}"),
             ("🔙 Daftar Negara", "adm_nations"),
         ]
@@ -170,6 +209,89 @@ def admin_handlers(db, super_admin_id):
                 )
                 return
 
+    async def give_custom_resource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        if not is_admin(query.from_user.id):
+            return
+
+        target_id = int(query.data.replace("adm_givecustom_", ""))
+        nation = db.get_nation(target_id)
+        if not nation:
+            return
+
+        buttons = [
+            ("💰 Money", f"adm_givesel_money_{target_id}"),
+            ("🍚 Food", f"adm_givesel_food_{target_id}"),
+            ("🪨 Materials", f"adm_givesel_materials_{target_id}"),
+            ("🛢️ Oil", f"adm_givesel_oil_{target_id}"),
+            ("🔬 Tech Points", f"adm_givesel_tech_points_{target_id}"),
+            ("🪖 Soldiers", f"adm_givesel_soldiers_{target_id}"),
+            ("🚜 Tanks", f"adm_givesel_tanks_{target_id}"),
+            ("✈️ Jets", f"adm_givesel_jets_{target_id}"),
+            ("☢️ Nukes", f"adm_givesel_nukes_{target_id}"),
+            ("😊 Happiness", f"adm_givesel_happiness_{target_id}"),
+            ("🔙 Kembali", f"adm_edit_{target_id}"),
+        ]
+
+        await query.edit_message_text(
+            f"📦 **Beri Resource ke {nation['name']}**\n\nPilih jenis resource:",
+            parse_mode="Markdown",
+            reply_markup=make_keyboard(buttons, columns=2)
+        )
+
+    async def give_select_resource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        if not is_admin(query.from_user.id):
+            return
+
+        # Parse: adm_givesel_{resource}_{target_id}
+        parts = query.data.replace("adm_givesel_", "").rsplit("_", 1)
+        resource = parts[0]
+        target_id = int(parts[1])
+        nation = db.get_nation(target_id)
+        if not nation:
+            return
+
+        context.user_data["awaiting_give_target"] = {
+            "target_id": target_id,
+            "resource": resource
+        }
+
+        await query.edit_message_text(
+            f"📦 **Beri {resource} ke {nation['name']}**\n\n"
+            f"Nilai saat ini: {nation.get(resource, 0)}\n\n"
+            f"Ketik jumlah yang ingin ditambahkan (bisa negatif):\n"
+            f"Contoh: `5000` atau `-1000`",
+            parse_mode="Markdown"
+        )
+
+    async def delete_nation_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        if not is_admin(query.from_user.id):
+            return
+
+        nations = db.get_all_nations()
+        if not nations:
+            await query.edit_message_text(
+                "📭 Tidak ada negara.",
+                reply_markup=make_keyboard([("🔙 Admin", "menu_admin")])
+            )
+            return
+
+        buttons = []
+        for n in nations:
+            buttons.append((f"🗑️ {n['name']}", f"adm_del_{n['user_id']}"))
+        buttons.append(("🔙 Admin", "menu_admin"))
+
+        await query.edit_message_text(
+            "🗑️ **Pilih negara untuk dihapus:**",
+            parse_mode="Markdown",
+            reply_markup=make_keyboard(buttons, columns=2)
+        )
+
     async def delete_nation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -182,8 +304,7 @@ def admin_handlers(db, super_admin_id):
             return
 
         await query.edit_message_text(
-            f"⚠️ **Hapus {nation['name']}?**\n\n"
-            f"Tindakan ini tidak bisa dibatalkan!",
+            f"⚠️ **Hapus {nation['name']}?**\n\nTindakan ini tidak bisa dibatalkan!",
             parse_mode="Markdown",
             reply_markup=make_keyboard([
                 ("✅ Ya, Hapus!", f"adm_delconfirm_{target_id}"),
@@ -233,7 +354,7 @@ def admin_handlers(db, super_admin_id):
                 f"⚔️ {atk_name} vs {def_name}\n"
                 f"  Skor: {w['attacker_wins']}-{w['defender_wins']} (R{w['total_rounds']})\n\n"
             )
-            buttons.append((f"🛑 Stop: {atk_name} vs {def_name}",
+            buttons.append((f"🛑 Stop: {atk_name[:8]} vs {def_name[:8]}",
                             f"adm_stopwar_{w['attacker_id']}_{w['defender_id']}"))
 
         buttons.append(("🔙 Admin", "menu_admin"))
@@ -264,9 +385,7 @@ def admin_handlers(db, super_admin_id):
         if not is_admin(query.from_user.id):
             return
 
-        from handlers.events import RANDOM_EVENTS, apply_event_effects
-        import random
-
+        from handlers.events import RANDOM_EVENTS
         nations = db.get_all_nations()
         if not nations:
             await query.answer("Tidak ada negara!", show_alert=True)
@@ -280,7 +399,7 @@ def admin_handlers(db, super_admin_id):
         buttons.append(("🔙 Admin", "menu_admin"))
 
         await query.edit_message_text(
-            "📰 **TRIGGER EVENT MANUAL**\n\nPilih event untuk ditrigger:",
+            "📰 **TRIGGER EVENT MANUAL**\n\nPilih event:",
             parse_mode="Markdown",
             reply_markup=make_keyboard(buttons, columns=2)
         )
@@ -314,7 +433,6 @@ def admin_handlers(db, super_admin_id):
         event_idx = int(query.data.replace("adm_evt_", ""))
         event = RANDOM_EVENTS[event_idx]
 
-        # Apply to random nation
         nation = random.choice(nations)
         apply_event_effects(db, nation, event["effects"])
         db.log_event(event["type"], nation["user_id"], event["description"], event["effects"])
@@ -371,7 +489,6 @@ def admin_handlers(db, super_admin_id):
 
         current = db.get_setting("game_active", True)
         db.set_setting("game_active", not current)
-
         status = "AKTIF ✅" if not current else "NONAKTIF ❌"
         await query.edit_message_text(
             f"🎮 **Game sekarang {status}**",
@@ -390,7 +507,7 @@ def admin_handlers(db, super_admin_id):
 
         await query.edit_message_text(
             f"⏱️ **Event frequency: {freq}s ({freq//60} menit)**\n\n"
-            f"⚠️ Restart bot untuk menerapkan perubahan.",
+            f"⚠️ Restart bot untuk menerapkan.",
             parse_mode="Markdown",
             reply_markup=make_keyboard([("🔙 Settings", "adm_settings")])
         )
@@ -403,8 +520,7 @@ def admin_handlers(db, super_admin_id):
 
         context.user_data["awaiting_broadcast"] = True
         await query.edit_message_text(
-            "📢 **BROADCAST**\n\n"
-            "Ketik pesan yang ingin dikirim ke semua pemain dan grup.\n"
+            "📢 **BROADCAST**\n\nKetik pesan yang ingin dikirim ke semua pemain dan grup.\n"
             "Ketik /cancel untuk batal.",
             parse_mode="Markdown"
         )
@@ -418,12 +534,13 @@ def admin_handlers(db, super_admin_id):
         nations = db.get_all_nations()
         buttons = []
         for n in nations:
-            buttons.append((f"🏛️ {n['name']}", f"adm_giveto_{n['user_id']}"))
-        buttons.append(("💰 Semua Negara +$5000", "adm_giveall"))
+            buttons.append((f"🏛️ {n['name']}", f"adm_givecustom_{n['user_id']}"))
+        buttons.append(("💰 Semua +$5000", "adm_giveall"))
+        buttons.append(("🍚 Semua +3000 Food", "adm_giveall_food"))
         buttons.append(("🔙 Admin", "menu_admin"))
 
         await query.edit_message_text(
-            "💰 **BERI RESOURCE**\n\nPilih negara target:",
+            "💰 **BERI RESOURCE**\n\nPilih negara atau beri ke semua:",
             parse_mode="Markdown",
             reply_markup=make_keyboard(buttons, columns=2)
         )
@@ -435,14 +552,23 @@ def admin_handlers(db, super_admin_id):
             return
 
         nations = db.get_all_nations()
-        for n in nations:
-            db.update_nation(n["user_id"], {"money": n["money"] + 5000})
 
-        await query.edit_message_text(
-            f"✅ **${format_number(5000)} diberikan ke {len(nations)} negara!**",
-            parse_mode="Markdown",
-            reply_markup=make_keyboard([("🔙 Admin", "menu_admin")])
-        )
+        if query.data == "adm_giveall_food":
+            for n in nations:
+                db.update_nation(n["user_id"], {"food": n["food"] + 3000})
+            await query.edit_message_text(
+                f"✅ **3,000 Food diberikan ke {len(nations)} negara!**",
+                parse_mode="Markdown",
+                reply_markup=make_keyboard([("🔙 Admin", "menu_admin")])
+            )
+        else:
+            for n in nations:
+                db.update_nation(n["user_id"], {"money": n["money"] + 5000})
+            await query.edit_message_text(
+                f"✅ **$5,000 diberikan ke {len(nations)} negara!**",
+                parse_mode="Markdown",
+                reply_markup=make_keyboard([("🔙 Admin", "menu_admin")])
+            )
 
     async def reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -476,8 +602,7 @@ def admin_handlers(db, super_admin_id):
         db.trade_offers.truncate()
 
         await query.edit_message_text(
-            "🔄 **GAME TELAH DI-RESET!**\n\n"
-            "Semua data terhapus. Game dimulai dari awal.",
+            "🔄 **GAME TELAH DI-RESET!**\n\nSemua data terhapus.",
             parse_mode="Markdown",
             reply_markup=make_keyboard([("🔙 Admin", "menu_admin")])
         )
@@ -505,10 +630,13 @@ def admin_handlers(db, super_admin_id):
         CommandHandler("admin", admin_menu),
         CallbackQueryHandler(admin_menu, pattern=r"^menu_admin$"),
         CallbackQueryHandler(manage_nations, pattern=r"^adm_nations$"),
-        CallbackQueryHandler(edit_nation, pattern=r"^adm_edit_"),
-        CallbackQueryHandler(admin_modify, pattern=r"^adm_(add|rem)_"),
+        CallbackQueryHandler(edit_nation, pattern=r"^adm_edit_\d+$"),
+        CallbackQueryHandler(admin_modify, pattern=r"^adm_(add|rem)_\w+_\d+$"),
+        CallbackQueryHandler(give_custom_resource, pattern=r"^adm_givecustom_\d+$"),
+        CallbackQueryHandler(give_select_resource, pattern=r"^adm_givesel_"),
+        CallbackQueryHandler(delete_nation_menu, pattern=r"^adm_delete_menu$"),
         CallbackQueryHandler(delete_nation, pattern=r"^adm_del_\d+$"),
-        CallbackQueryHandler(confirm_delete, pattern=r"^adm_delconfirm_"),
+        CallbackQueryHandler(confirm_delete, pattern=r"^adm_delconfirm_\d+$"),
         CallbackQueryHandler(manage_wars, pattern=r"^adm_wars$"),
         CallbackQueryHandler(stop_war, pattern=r"^adm_stopwar_"),
         CallbackQueryHandler(trigger_event, pattern=r"^adm_event$"),
@@ -518,7 +646,7 @@ def admin_handlers(db, super_admin_id):
         CallbackQueryHandler(set_frequency, pattern=r"^adm_freq_"),
         CallbackQueryHandler(broadcast, pattern=r"^adm_broadcast$"),
         CallbackQueryHandler(give_resources, pattern=r"^adm_give$"),
-        CallbackQueryHandler(give_all, pattern=r"^adm_giveall$"),
+        CallbackQueryHandler(give_all, pattern=r"^adm_giveall"),
         CallbackQueryHandler(reset_confirm, pattern=r"^adm_reset_confirm$"),
         CallbackQueryHandler(do_reset, pattern=r"^adm_reset_do$"),
         CallbackQueryHandler(export_data, pattern=r"^adm_export$"),
