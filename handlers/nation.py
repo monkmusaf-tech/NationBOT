@@ -1,13 +1,48 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ConversationHandler
 )
 from utils.helpers import (
     nation_summary, make_keyboard, IDEOLOGY_MAP, format_number
 )
 
-NAMING = 1
+
+async def process_nation_name(update: Update, context: ContextTypes.DEFAULT_TYPE, db):
+    """Called from bot.py text router when user is naming their nation."""
+    user_id = update.effective_user.id
+    if db.get_nation(user_id):
+        context.user_data.pop("pending_ideology", None)
+        return
+
+    name = update.message.text.strip()
+    if len(name) < 3 or len(name) > 30:
+        await update.message.reply_text("⚠️ Nama harus 3-30 karakter. Coba lagi:")
+        return
+
+    if db.get_nation_by_name(name):
+        await update.message.reply_text("⚠️ Nama sudah dipakai. Pilih nama lain:")
+        return
+
+    ideology = context.user_data.pop("pending_ideology")
+    nation = db.create_nation(user_id, name, ideology)
+
+    if ideology in IDEOLOGY_MAP:
+        db.update_nation(user_id, IDEOLOGY_MAP[ideology])
+
+    db.log_event("nation_created", user_id, f"Negara {name} telah didirikan!")
+
+    await update.message.reply_text(
+        f"🎉 **NEGARA DIDIRIKAN!** 🎉\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏛️ **{name}** resmi berdiri!\n"
+        f"🏛️ Pemerintahan: {ideology.title()}\n"
+        f"💰 Dana awal: $10,000\n"
+        f"👥 Populasi: 100,000\n"
+        f"🪖 Tentara: 1,000\n\n"
+        f"Gunakan /negara untuk melihat detail.\n"
+        f"Gunakan /help untuk panduan lengkap.",
+        parse_mode="Markdown"
+    )
 
 
 def nation_handlers(db):
@@ -38,43 +73,6 @@ def nation_handlers(db):
             parse_mode="Markdown"
         )
 
-    async def name_nation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if db.get_nation(user_id):
-            return
-        if "pending_ideology" not in context.user_data:
-            return
-
-        name = update.message.text.strip()
-        if len(name) < 3 or len(name) > 30:
-            await update.message.reply_text("⚠️ Nama harus 3-30 karakter. Coba lagi:")
-            return
-
-        if db.get_nation_by_name(name):
-            await update.message.reply_text("⚠️ Nama sudah dipakai. Pilih nama lain:")
-            return
-
-        ideology = context.user_data.pop("pending_ideology")
-        nation = db.create_nation(user_id, name, ideology)
-
-        if ideology in IDEOLOGY_MAP:
-            db.update_nation(user_id, IDEOLOGY_MAP[ideology])
-
-        db.log_event("nation_created", user_id, f"Negara {name} telah didirikan!")
-
-        await update.message.reply_text(
-            f"🎉 **NEGARA DIDIRIKAN!** 🎉\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🏛️ **{name}** resmi berdiri!\n"
-            f"🏛️ Pemerintahan: {ideology.title()}\n"
-            f"💰 Dana awal: $10,000\n"
-            f"👥 Populasi: 100,000\n"
-            f"🪖 Tentara: 1,000\n\n"
-            f"Gunakan /negara untuk melihat detail.\n"
-            f"Gunakan /help untuk panduan lengkap.",
-            parse_mode="Markdown"
-        )
-
     async def view_nation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         nation = db.get_nation(user_id)
@@ -85,7 +83,6 @@ def nation_handlers(db):
             return
 
         text = nation_summary(nation, db)
-
         keyboard = make_keyboard([
             ("💰 Ekonomi", "menu_ekonomi"),
             ("⚔️ Militer", "menu_militer"),
@@ -94,7 +91,6 @@ def nation_handlers(db):
             ("💥 Perang", "menu_perang"),
             ("📰 Event", "menu_event"),
         ])
-
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,10 +114,6 @@ def nation_handlers(db):
 
     return [
         CallbackQueryHandler(ideology_callback, pattern=r"^ideology_"),
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-            name_nation
-        ),
         CommandHandler("negara", view_nation),
         CommandHandler("ranking", ranking_cmd),
     ]
